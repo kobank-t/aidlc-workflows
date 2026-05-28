@@ -1,0 +1,61 @@
+name: sync-upstream-v2
+on:
+  schedule:
+    - cron: '0 21 * * *'   # 毎日 06:00 JST（21:00 UTC）
+  workflow_dispatch:
+permissions:
+  contents: write
+  issues: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: v2
+          fetch-depth: 0
+      - name: Fetch upstream & detect new commits
+        id: detect
+        run: |
+          git remote add upstream https://github.com/awslabs/aidlc-workflows.git
+          git fetch upstream v2 main
+          BEHIND=$(git rev-list --count HEAD..upstream/v2)
+          echo "behind=$BEHIND" >> "$GITHUB_OUTPUT"
+          echo "base=$(git merge-base HEAD upstream/v2)" >> "$GITHUB_OUTPUT"
+          echo "new=$(git rev-parse upstream/v2)" >> "$GITHUB_OUTPUT"
+      - name: Mirror main (best-effort, exact)
+        run: |
+          git push origin upstream/main:refs/heads/main || true
+      - name: Merge upstream/v2 & push
+        if: steps.detect.outputs.behind != '0'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git merge --no-edit upstream/v2
+          git push origin v2
+      - name: Summarize & open issue
+        if: steps.detect.outputs.behind != '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE: ${{ steps.detect.outputs.base }}
+          NEW: ${{ steps.detect.outputs.new }}
+        run: |
+          {
+            echo "## upstream v2 を同期しました（$(date +%F)）"
+            echo ""
+            echo "- 範囲: \`${BASE}..${NEW}\`"
+            echo "- compare（全差分）: https://github.com/awslabs/aidlc-workflows/compare/${BASE}...${NEW}"
+            echo ""
+            echo "### 変更ファイル"
+            echo '```'
+            git diff --name-status "${BASE}".."${NEW}"
+            echo '```'
+            echo "### コミット"
+            echo '```'
+            git log --oneline --no-merges "${BASE}".."${NEW}"
+            echo '```'
+          } > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "sync: upstream v2 取り込み $(date +%F)" \
+            --body-file summary.md || true
